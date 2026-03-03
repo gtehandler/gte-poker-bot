@@ -1,0 +1,14 @@
+{
+  "name": "gte-poker-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for GTE Poker Tracker",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "ioredis": "^5.4.2",
+    "telegraf": "^4.16.3"
+  }
+}
