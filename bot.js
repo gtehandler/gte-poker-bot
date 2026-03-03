@@ -535,13 +535,26 @@ bot.on("text", async (ctx) => {
   }
 });
 
-/* ── Launch ── */
-bot.launch().then(() => {
-  console.log(`Bot started: @${bot.botInfo?.username}`);
-}).catch((err) => {
-  console.error("Bot launch failed:", err);
-  process.exit(1);
-});
+/* ── Launch with retry (handles 409 conflict during redeploys) ── */
+async function launchWithRetry(maxRetries = 5) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      await bot.launch({ dropPendingUpdates: true });
+      console.log(`Bot started: @${bot.botInfo?.username}`);
+      return;
+    } catch (err) {
+      if (err?.response?.error_code === 409 && i < maxRetries - 1) {
+        const wait = (i + 1) * 3;
+        console.log(`409 conflict, retrying in ${wait}s... (${i + 1}/${maxRetries})`);
+        await new Promise((r) => setTimeout(r, wait * 1000));
+      } else {
+        console.error("Bot launch failed:", err);
+        process.exit(1);
+      }
+    }
+  }
+}
+launchWithRetry();
 
 process.once("SIGINT", () => { bot.stop("SIGINT"); redis.disconnect(); });
 process.once("SIGTERM", () => { bot.stop("SIGTERM"); redis.disconnect(); });
