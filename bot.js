@@ -1157,21 +1157,45 @@ async function startBot() {
 
   // Verify token works
   const me = await bot.telegram.getMe();
+  bot.botInfo = me;
+  bot.options.username = me.username;
   console.log(`Token OK: @${me.username}`);
 
   await bot.telegram.deleteWebhook({ drop_pending_updates: true });
   console.log("Webhook deleted, pending updates dropped");
 
-  // Launch with error catching — promise may never resolve on Railway
-  bot.launch().then(() => {
-    console.log("bot.launch() resolved");
-  }).catch((err) => {
-    console.error("bot.launch() error:", err.message);
-  });
+  // Manual long-polling since bot.launch() never starts polling on Railway
+  let offset = 0;
+  console.log("Starting manual long-polling...");
 
-  // Wait a bit then verify polling is working
-  await new Promise((r) => setTimeout(r, 3000));
-  console.log("Bot should be polling now. Polling status:", bot.botInfo?.username || "unknown");
+  async function poll() {
+    while (true) {
+      try {
+        const updates = await bot.telegram.callApi("getUpdates", {
+          offset,
+          timeout: 30,
+          allowed_updates: ["message", "callback_query", "edited_message"],
+        });
+        if (updates && updates.length > 0) {
+          console.log(`[POLL] Got ${updates.length} update(s)`);
+          for (const update of updates) {
+            offset = update.update_id + 1;
+            try {
+              await bot.handleUpdate(update);
+            } catch (err) {
+              console.error("[POLL] handleUpdate error:", err.message);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[POLL] getUpdates error:", err.message);
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+    }
+  }
+
+  poll();
+  console.log("Bot is live with manual polling!");
 }
 
 startBot().catch((err) => {
@@ -1179,5 +1203,5 @@ startBot().catch((err) => {
   process.exit(1);
 });
 
-process.once("SIGINT", () => { bot.stop("SIGINT"); redis.disconnect(); });
-process.once("SIGTERM", () => { bot.stop("SIGTERM"); redis.disconnect(); });
+process.once("SIGINT", () => { redis.disconnect(); process.exit(0); });
+process.once("SIGTERM", () => { redis.disconnect(); process.exit(0); });
