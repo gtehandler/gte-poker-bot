@@ -436,15 +436,33 @@ bot.command("register", async (ctx) => {
 
     if (players.length === 0) return ctx.reply("No players in the system yet. Ask an admin to add players via the web app.");
 
+    // Check if a number was provided: /register 3
+    const arg = ctx.message.text.split(" ")[1];
+    if (arg) {
+      const num = parseInt(arg);
+      if (!num || num < 1 || num > players.length) {
+        return ctx.reply(`Invalid number. Send /register with a number 1-${players.length}.`);
+      }
+      const chosen = players[num - 1];
+      const claimedBy = Object.entries(tgMap).find(([id, name]) => name === chosen.name && id !== userId);
+      if (claimedBy) return ctx.reply(`${chosen.name} is already claimed by another user. Pick a different number.`);
+      tgMap[userId] = chosen.name;
+      await saveTgMap(tgMap);
+      delete conversations[ctx.from.id];
+      return ctx.reply(`\u{2705} Registered as <b>${chosen.avatar || "\u{1F3AD}"} ${chosen.name}</b>! You can now use all bot commands.`, { parse_mode: "HTML" });
+    }
+
+    // No number — show the list
     conversations[ctx.from.id] = { type: "register", step: 0, data: {} };
     let text = "\u{1F4CB} <b>Register</b>\n\n";
     if (current) text += `Currently registered as: <b>${current}</b>\n\n`;
-    text += "Pick your name:\n\n";
+    text += "Pick your name by sending /register &lt;number&gt;\n\n";
     players.forEach((p, i) => {
       const claimed = Object.entries(tgMap).find(([uid, name]) => name === p.name && uid !== userId);
       const tag = claimed ? " (taken)" : "";
       text += `<b>${i + 1}</b> — ${p.avatar || "\u{1F3AD}"} ${p.name}${tag}\n`;
     });
+    text += `\nExample: <code>/register 1</code>`;
     ctx.reply(text, { parse_mode: "HTML" });
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
 });
