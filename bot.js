@@ -25,7 +25,7 @@ redis.on("connect", () => console.log("Redis connected"));
 /* ══════════════════════════════════════════════
    HELPERS
    ══════════════════════════════════════════════ */
-function totalIn(r) { return r.buyIn * (1 + r.rebuys); }
+function totalIn(r) { return r.buyIn * (1 + (r.rebuys || 0)) + (r.addOns || []).reduce((a, b) => a + b, 0); }
 function pl(r) { return r.cashOut - totalIn(r); }
 function fmt(n) { return n >= 0 ? `+$${n.toLocaleString()}` : `-$${Math.abs(n).toLocaleString()}`; }
 
@@ -406,7 +406,8 @@ bot.command("start", async (ctx) => {
     `/trashtalk — Roast messages\n` +
     `/ifeellikepablo — Ye wisdom\n\n` +
     `<b>\u{270D}\u{FE0F} Write Commands</b>\n` +
-    `/buyin &lt;amount&gt; — Buy in\n` +
+    `/buyin &lt;amount&gt; — Buy in / add-on\n` +
+    `/rebuy — Rebuy (same amount)\n` +
     `/cashout &lt;amount&gt; — Cash out\n` +
     `/rsvp — Confirm for next game\n` +
     `/cancelrsvp — Cancel RSVP\n` +
@@ -895,19 +896,19 @@ bot.command("buyin", async (ctx) => {
 
     const existing = data.results.find((r) => r.sessionId === latest.id && r.player === name);
     if (existing) {
-      // Rebuy — must match original buy-in
-      if (amount !== existing.buyIn) {
-        return ctx.reply(`Rebuy must match your original buy-in of $${existing.buyIn}.\nUse /buyin ${existing.buyIn}`);
-      }
-      existing.rebuys += 1;
+      // Add-on (counts as rebuy) — any amount allowed
+      if (!existing.addOns) existing.addOns = [];
+      existing.addOns.push(amount);
+      existing.settled = false;
       await saveData(data);
-      const msg = `\u{1F504} ${dn(name, data.players)} rebuy #${existing.rebuys} ($${existing.buyIn})\nTotal in: $${totalIn(existing)}`;
+      const rebuyNum = (existing.rebuys || 0) + existing.addOns.length;
+      const msg = `\u{1F504} ${dn(name, data.players)} rebuy #${rebuyNum} ($${amount})\nTotal in: $${totalIn(existing)}`;
       ctx.reply(msg, { parse_mode: "HTML" });
       notify(msg);
     } else {
       // First buy-in
       const id = data.counters.nextRId || data.results.length + 1;
-      const result = { id, sessionId: latest.id, player: name, buyIn: amount, rebuys: 0, cashOut: 0 };
+      const result = { id, sessionId: latest.id, player: name, buyIn: amount, rebuys: 0, cashOut: 0, addOns: [], settled: false };
       data.results.push(result);
       data.counters.nextRId = id + 1;
       await saveData(data);
@@ -916,6 +917,28 @@ bot.command("buyin", async (ctx) => {
       ctx.reply(msg, { parse_mode: "HTML" });
       notify(msg);
     }
+  } catch (e) { ctx.reply(`Error: ${e.message}`); }
+});
+
+bot.command("rebuy", async (ctx) => {
+  try {
+    const data = await getData();
+    if (data.sessions.length === 0) return ctx.reply("No active session.");
+    const latest = data.sessions[data.sessions.length - 1];
+    const name = ctx.state.playerName;
+
+    const existing = data.results.find((r) => r.sessionId === latest.id && r.player === name);
+    if (!existing) return ctx.reply("You haven't bought in yet. Use /buyin <amount> first.");
+    if (existing.settled) return ctx.reply("You've already cashed out. Use /buyin <amount> to re-enter.");
+
+    if (!existing.addOns) existing.addOns = [];
+    existing.addOns.push(existing.buyIn);
+    existing.settled = false;
+    await saveData(data);
+    const rebuyNum = (existing.rebuys || 0) + existing.addOns.length;
+    const msg = `\u{1F504} ${dn(name, data.players)} rebuy #${rebuyNum} ($${existing.buyIn})\nTotal in: $${totalIn(existing)}`;
+    ctx.reply(msg, { parse_mode: "HTML" });
+    notify(msg);
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
 });
 
@@ -935,6 +958,7 @@ bot.command("cashout", async (ctx) => {
     if (!existing) return ctx.reply("You haven't bought in yet. Use /buyin <amount> first.");
 
     existing.cashOut = amount;
+    existing.settled = true;
     await saveData(data);
     const n = pl(existing);
     const emoji = n >= 0 ? "\u{1F7E2}" : "\u{1F534}";
