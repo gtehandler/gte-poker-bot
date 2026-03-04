@@ -561,13 +561,16 @@ bot.command("livesession", async (ctx) => {
       sr.sort((a, b) => pl(b) - pl(a));
       sr.forEach((r) => {
         totalPot += totalIn(r);
-        const rebuyText = r.rebuys > 0 ? ` (${r.rebuys} rebuy${r.rebuys > 1 ? "s" : ""})` : "";
-        if (r.cashOut > 0) {
+        const rebuyCount = (r.rebuys || 0) + (r.addOns || []).length;
+        const rebuyText = rebuyCount > 0 ? ` (${rebuyCount} rebuy${rebuyCount > 1 ? "s" : ""})` : "";
+        const settled = r.settled != null ? r.settled : r.cashOut > 0;
+        if (settled) {
           const n = pl(r);
           text += `${dn(r.player, players)}\n   In: $${totalIn(r)}${rebuyText} | Out: $${r.cashOut} | <b>${fmt(n)}</b>\n\n`;
         } else {
           stillPlaying++;
-          text += `${dn(r.player, players)}\n   In: $${totalIn(r)}${rebuyText} | Out: <i>pending</i>\n\n`;
+          const partialText = r.cashOut > 0 ? ` (partial: $${r.cashOut})` : "";
+          text += `${dn(r.player, players)}\n   In: $${totalIn(r)}${rebuyText} | Out: <i>playing</i>${partialText}\n\n`;
         }
       });
       text += `\u{1F4B0} Total pot: $${totalPot.toLocaleString()}`;
