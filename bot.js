@@ -34,6 +34,7 @@ function plAdj(r, sessions) {
   return (r.cashOut + bonus) - totalIn(r);
 }
 function fmt(n) { return n >= 0 ? `+$${n.toLocaleString()}` : `-$${Math.abs(n).toLocaleString()}`; }
+function sessionLabel(s) { return s?.name || `S${s?.id}`; }
 
 async function getData() {
   const [sessions, results, players, counters, nextGame] = await Promise.all([
@@ -307,8 +308,8 @@ function generateTrashTalk(results, sessions, players) {
   // Session size records
   sessions.forEach(s => {
     const count = results.filter(r => r.sessionId === s.id).length;
-    if (count >= 8) msgs.push(`S${s.id} had ${count} players at the table... absolute madhouse \u{1F3DF}\u{FE0F}`);
-    else if (count >= 6) msgs.push(`S${s.id} got ${count} players together... full ring energy \u{1F4A5}`);
+    if (count >= 8) msgs.push(`${sessionLabel(s)} had ${count} players at the table... absolute madhouse \u{1F3DF}\u{FE0F}`);
+    else if (count >= 6) msgs.push(`${sessionLabel(s)} got ${count} players together... full ring energy \u{1F4A5}`);
   });
 
   // Group pot milestone
@@ -328,7 +329,7 @@ function calcH2H(player1, player2, results, sessions) {
   const breakdown = shared.map((s) => {
     const r1 = results.find((r) => r.player === player1 && r.sessionId === s.id);
     const r2 = results.find((r) => r.player === player2 && r.sessionId === s.id);
-    return { num: s.id, date: s.date, p1pl: r1 ? plAdj(r1, sessions) : 0, p2pl: r2 ? plAdj(r2, sessions) : 0 };
+    return { num: s.id, label: sessionLabel(s), date: s.date, p1pl: r1 ? plAdj(r1, sessions) : 0, p2pl: r2 ? plAdj(r2, sessions) : 0 };
   });
   return {
     shared: shared.length,
@@ -511,6 +512,7 @@ bot.command("start", async (ctx) => {
       `/delresult &lt;#&gt; — Delete result\n` +
       `/closesession — Complete session\n` +
       `/reopensession — Reopen session\n` +
+      `/editsession &lt;name&gt; — Rename session\n` +
       `/transfer &lt;buyer&gt; &lt;seller&gt; &lt;amt&gt; — Record chip transfer\n\n` : "") +
     `\u{1F310} <a href="https://gte-poker.vercel.app">Open Web App</a>`,
     { parse_mode: "HTML", disable_web_page_preview: true }
@@ -658,10 +660,10 @@ bot.command("livesession", async (ctx) => {
     const { sessions, results, players } = await getData();
     if (sessions.length === 0) return ctx.reply("No sessions yet.");
     const latest = sessions[sessions.length - 1];
-    if (latest.completed) return ctx.reply(`No live session. The most recent session (S${latest.id}) is completed.`);
+    if (latest.completed) return ctx.reply(`No live session. The most recent session (${sessionLabel(latest)}) is completed.`);
     const sr = results.filter((r) => r.sessionId === latest.id);
 
-    let text = `\u{1F3B0} <b>LIVE SESSION — S${latest.id}</b>\n`;
+    let text = `\u{1F3B0} <b>LIVE SESSION — ${sessionLabel(latest)}</b>\n`;
     text += `${latest.date} | ${latest.host} | ${latest.gameType} ${latest.stakes}\n\u{1F4CD} ${latest.location}\n\n`;
 
     if (sr.length === 0) {
@@ -697,7 +699,7 @@ bot.command("sessions", async (ctx) => {
     if (sessions.length === 0) return ctx.reply("No sessions yet.");
     let text = "\u{1F4C5} <b>SESSIONS</b>\n\n";
     [...sessions].reverse().forEach((s) => {
-      text += `<b>S${s.id}</b> | ${s.date} | ${s.host} | ${s.gameType} ${s.stakes}\n   \u{1F4CD} ${s.location}\n\n`;
+      text += `<b>${sessionLabel(s)}</b> | ${s.date} | ${s.host} | ${s.gameType} ${s.stakes}\n   \u{1F4CD} ${s.location}${s.completed ? " \u{2705}" : ""}\n\n`;
     });
     ctx.reply(text, { parse_mode: "HTML" });
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
@@ -713,8 +715,8 @@ bot.command("results", async (ctx) => {
       return ctx.reply(`Usage: /results <session id>\nAvailable: ${ids}`);
     }
     const sr = results.filter((r) => r.sessionId === sess.id);
-    if (sr.length === 0) return ctx.reply(`No results for S${sess.id}.`);
-    let text = `\u{1F3B2} <b>S${sess.id} — ${sess.date}</b>\n${sess.host} | ${sess.gameType} ${sess.stakes} | ${sess.location}\n\n`;
+    if (sr.length === 0) return ctx.reply(`No results for ${sessionLabel(sess)}.`);
+    let text = `\u{1F3B2} <b>${sessionLabel(sess)} — ${sess.date}</b>\n${sess.host} | ${sess.gameType} ${sess.stakes} | ${sess.location}\n\n`;
     sr.sort((a, b) => plAdj(b, sessions) - plAdj(a, sessions));
     const best = sr[0];
     sr.forEach((r) => {
@@ -883,7 +885,7 @@ bot.command("h2h", async (ctx) => {
       h2h.breakdown.forEach((s) => {
         const p1e = s.p1pl >= 0 ? "\u{1F7E2}" : "\u{1F534}";
         const p2e = s.p2pl >= 0 ? "\u{1F7E2}" : "\u{1F534}";
-        text += `S${s.num} ${s.date} — ${p1e} ${fmt(s.p1pl)} | ${p2e} ${fmt(s.p2pl)}\n`;
+        text += `${s.label} ${s.date} — ${p1e} ${fmt(s.p1pl)} | ${p2e} ${fmt(s.p2pl)}\n`;
       });
     }
     ctx.reply(text, { parse_mode: "HTML" });
@@ -912,14 +914,14 @@ bot.command("hof", async (ctx) => {
     const { results, sessions, players } = await getData();
     const hof = calcHallOfFame(results, sessions);
     if (!hof) return ctx.reply("No results yet.");
-    const bestSessNum = hof.best.sessionId;
-    const worstSessNum = hof.worst.sessionId;
+    const bestSess = sessions.find(x => x.id === hof.best.sessionId);
+    const worstSess = sessions.find(x => x.id === hof.worst.sessionId);
     let text = `\u{1F3C6} <b>HALL OF FAME</b>\n\n`;
     text += `\u{1F451} Best Single Session\n`;
-    text += `   ${dn(hof.best.player, players)} — <b>${fmt(hof.best.amount)}</b> (S${bestSessNum})\n\n`;
+    text += `   ${dn(hof.best.player, players)} — <b>${fmt(hof.best.amount)}</b> (${sessionLabel(bestSess)})\n\n`;
     text += `\u{1F4A9} <b>HALL OF SHAME</b>\n\n`;
     text += `\u{1F480} Worst Single Session\n`;
-    text += `   ${dn(hof.worst.player, players)} — <b>${fmt(hof.worst.amount)}</b> (S${worstSessNum})\n`;
+    text += `   ${dn(hof.worst.player, players)} — <b>${fmt(hof.worst.amount)}</b> (${sessionLabel(worstSess)})\n`;
     ctx.reply(text, { parse_mode: "HTML" });
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
 });
@@ -1030,7 +1032,7 @@ bot.command("buyin", async (ctx) => {
       data.results.push(result);
       data.counters.nextRId = id + 1;
       await saveData(data);
-      const msg = `\u{1F4B5} ${dn(name, data.players)} bought in for $${amount} (S${latest.id})`;
+      const msg = `\u{1F4B5} ${dn(name, data.players)} bought in for $${amount} (${sessionLabel(latest)})`;
       ctx.reply(msg, { parse_mode: "HTML" });
       notify(msg);
     }
@@ -1104,7 +1106,7 @@ bot.command("addresult", async (ctx) => {
     if (sessions.length === 0) return ctx.reply("No sessions yet. Create one first with /newsession");
     conversations[ctx.from.id] = { type: "addresult", step: 0, data: {} };
     let sessionList = "Which session? Send the session ID:\n\n";
-    sessions.forEach((s) => { sessionList += `<b>S${s.id}</b> \u{2014} ${s.date} (${s.gameType} ${s.stakes})\n`; });
+    sessions.forEach((s) => { sessionList += `<b>${sessionLabel(s)}</b> \u{2014} ${s.date} (${s.gameType} ${s.stakes})\n`; });
     ctx.reply(`\u{1F4DD} <b>Add Result</b>\n\n${sessionList}`, { parse_mode: "HTML" });
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
 });
@@ -1122,7 +1124,7 @@ bot.command("delsession", async (ctx) => {
     data.sessions = data.sessions.filter((s) => s.id !== sess.id);
     data.results = data.results.filter((r) => r.sessionId !== sess.id);
     await saveData(data);
-    const msg = `\u{1F5D1} Deleted session S${sess.id} (${sess.date} \u{2014} ${sess.gameType})`;
+    const msg = `\u{1F5D1} Deleted session ${sessionLabel(sess)} (${sess.date} \u{2014} ${sess.gameType})`;
     ctx.reply(msg);
     notify(msg);
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
@@ -1150,10 +1152,10 @@ bot.command("closesession", async (ctx) => {
     const data = await getData();
     if (data.sessions.length === 0) return ctx.reply("No sessions.");
     const latest = data.sessions[data.sessions.length - 1];
-    if (latest.completed) return ctx.reply(`S${latest.id} is already completed.`);
+    if (latest.completed) return ctx.reply(`${sessionLabel(latest)} is already completed.`);
     latest.completed = true;
     await saveData(data);
-    const msg = `\u{2705} Session S${latest.id} is now completed.`;
+    const msg = `\u{2705} Session ${sessionLabel(latest)} is now completed.`;
     ctx.reply(msg);
     notify(msg);
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
@@ -1165,10 +1167,28 @@ bot.command("reopensession", async (ctx) => {
     const data = await getData();
     if (data.sessions.length === 0) return ctx.reply("No sessions.");
     const latest = data.sessions[data.sessions.length - 1];
-    if (!latest.completed) return ctx.reply(`S${latest.id} is already active.`);
+    if (!latest.completed) return ctx.reply(`${sessionLabel(latest)} is already active.`);
     latest.completed = false;
     await saveData(data);
-    const msg = `\u{1F504} Session S${latest.id} has been reopened.`;
+    const msg = `\u{1F504} Session ${sessionLabel(latest)} has been reopened.`;
+    ctx.reply(msg);
+    notify(msg);
+  } catch (e) { ctx.reply(`Error: ${e.message}`); }
+});
+
+/* ── /editsession <name> ── */
+bot.command("editsession", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("\u{1F6AB} Admin only.");
+  try {
+    const data = await getData();
+    if (data.sessions.length === 0) return ctx.reply("No sessions.");
+    const latest = data.sessions[data.sessions.length - 1];
+    const newName = ctx.message.text.split(/\s+/).slice(1).join(" ").trim();
+    if (!newName) return ctx.reply(`Usage: /editsession <name>\nRenames the latest session (${sessionLabel(latest)}).`);
+    const oldLabel = sessionLabel(latest);
+    latest.name = newName;
+    await saveData(data);
+    const msg = `\u{270F}\u{FE0F} Session renamed: ${oldLabel} \u{2192} ${sessionLabel(latest)}`;
     ctx.reply(msg);
     notify(msg);
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
@@ -1181,7 +1201,7 @@ bot.command("transfer", async (ctx) => {
     const data = await getData();
     if (data.sessions.length === 0) return ctx.reply("No sessions.");
     const latest = data.sessions[data.sessions.length - 1];
-    if (latest.completed) return ctx.reply(`S${latest.id} is completed. Reopen it first.`);
+    if (latest.completed) return ctx.reply(`${sessionLabel(latest)} is completed. Reopen it first.`);
 
     const args = ctx.message.text.split(/\s+/).slice(1);
     if (args.length < 3) return ctx.reply("Usage: /transfer <buyer> <seller> <amount>\nBuyer = gets chips, Seller = gives chips from their stack.");
@@ -1221,7 +1241,7 @@ bot.command("transfer", async (ctx) => {
     }
 
     await saveData(data);
-    const msg = `\u{1F4B1} Transfer recorded for S${latest.id}:\n${dn(buyerName, data.players)} bought $${amount} in chips from ${dn(sellerName, data.players)}`;
+    const msg = `\u{1F4B1} Transfer recorded for ${sessionLabel(latest)}:\n${dn(buyerName, data.players)} bought $${amount} in chips from ${dn(sellerName, data.players)}`;
     ctx.reply(msg);
     notify(msg);
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
@@ -1278,12 +1298,12 @@ bot.on("text", async (ctx) => {
         conv.data.location = text;
         const data = await getData();
         const id = data.counters.nextSId || data.sessions.length + 1;
-        const sess = { id, date: conv.data.date, host: conv.data.host, gameType: conv.data.gameType, stakes: conv.data.stakes, location: conv.data.location };
+        const sess = { id, date: conv.data.date, host: conv.data.host, gameType: conv.data.gameType, stakes: conv.data.stakes, location: conv.data.location, completed: false, transfers: [] };
         data.sessions.push(sess);
         data.counters.nextSId = id + 1;
         await saveData(data);
         delete conversations[userId];
-        const msg = `\u{2705} Session S${sess.id} created!\n\n\u{1F4C5} ${sess.date} | ${sess.host}\n\u{1F3AE} ${sess.gameType} ${sess.stakes}\n\u{1F4CD} ${sess.location}\n\nPlayers: use /buyin <amount> to join!`;
+        const msg = `\u{2705} Session ${sessionLabel(sess)} created!\n\n\u{1F4C5} ${sess.date} | ${sess.host}\n\u{1F3AE} ${sess.gameType} ${sess.stakes}\n\u{1F4CD} ${sess.location}\n\nPlayers: use /buyin <amount> to join!`;
         ctx.reply(msg);
         notify(msg);
         return;
@@ -1340,7 +1360,8 @@ bot.on("text", async (ctx) => {
         await saveData(data);
         delete conversations[userId];
         const n = plAdj(result, data.sessions);
-        const msg = `\u{2705} Result added to S${conv.data.sessionNum}\n\n${dn(result.player, data.players)}\nBuy-in: $${result.buyIn} | Rebuys: ${result.rebuys} | Cash-out: $${result.cashOut}\nP/L: <b>${fmt(n)}</b>`;
+        const addedSess = data.sessions.find(x => x.id === conv.data.sessionId);
+        const msg = `\u{2705} Result added to ${sessionLabel(addedSess)}\n\n${dn(result.player, data.players)}\nBuy-in: $${result.buyIn} | Rebuys: ${result.rebuys} | Cash-out: $${result.cashOut}\nP/L: <b>${fmt(n)}</b>`;
         ctx.reply(msg, { parse_mode: "HTML" });
         notify(msg);
         return;
