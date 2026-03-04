@@ -363,6 +363,10 @@ bot.use(async (ctx, next) => {
   // /start and /register are open to everyone
   if (cmd === "start" || cmd === "register") return next();
 
+  // Allow follow-up messages from users in a register conversation
+  const userId = ctx.from?.id;
+  if (userId && conversations[userId]?.type === "register") return next();
+
   // All other commands require registration
   const tgMap = await getTgMap();
   const playerName = tgMap[String(ctx.from?.id)];
