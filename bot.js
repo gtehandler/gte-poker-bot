@@ -358,6 +358,7 @@ async function notify(text) {
 bot.use(async (ctx, next) => {
   const text = ctx.message?.text || "";
   const cmd = text.split(" ")[0].toLowerCase().replace(/^\//, "").split("@")[0];
+  console.log(`[MW] update type=${ctx.updateType} cmd="${cmd}" from=${ctx.from?.id} text="${text.slice(0, 50)}"`);
 
   // /start and /register are open to everyone
   if (cmd === "start" || cmd === "register") return next();
@@ -1158,10 +1159,19 @@ async function startBot() {
   const me = await bot.telegram.getMe();
   console.log(`Token OK: @${me.username}`);
 
-  // Fire-and-forget: bot.launch() properly initializes middleware + polling
-  // but its promise never resolves on Railway, so we don't await it
-  bot.launch({ dropPendingUpdates: true });
-  console.log("Bot launched (fire-and-forget)!");
+  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+  console.log("Webhook deleted, pending updates dropped");
+
+  // Launch with error catching — promise may never resolve on Railway
+  bot.launch().then(() => {
+    console.log("bot.launch() resolved");
+  }).catch((err) => {
+    console.error("bot.launch() error:", err.message);
+  });
+
+  // Wait a bit then verify polling is working
+  await new Promise((r) => setTimeout(r, 3000));
+  console.log("Bot should be polling now. Polling status:", bot.botInfo?.username || "unknown");
 }
 
 startBot().catch((err) => {
