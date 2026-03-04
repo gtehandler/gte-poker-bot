@@ -1149,34 +1149,52 @@ bot.on("text", async (ctx) => {
 
 console.log("ENV check — BOT_TOKEN set:", !!process.env.BOT_TOKEN, "REDIS_URL set:", !!process.env.REDIS_URL, "ADMIN_USERS:", process.env.ADMIN_USERS || "(none)");
 
-async function launchWithRetry(maxRetries = 8) {
-  // Wait 10s on startup to let old container die during Railway deploys
-  console.log("Waiting 10s for old container to shut down...");
-  await new Promise((r) => setTimeout(r, 10000));
+async function startBot() {
+  // Step 1: Wait for old container to fully die during Railway deploys
+  console.log("Waiting 15s for old container to shut down...");
+  await new Promise((r) => setTimeout(r, 15000));
 
-  for (let i = 0; i < maxRetries; i++) {
+  // Step 2: Verify token works
+  try {
+    const me = await bot.telegram.getMe();
+    console.log(`Token OK: @${me.username}`);
+  } catch (err) {
+    console.error("Token verification failed:", err.message);
+    process.exit(1);
+  }
+
+  // Step 3: Clear any stale webhook/polling
+  try {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    console.log("Webhook cleared");
+  } catch (err) {
+    console.error("deleteWebhook failed:", err.message);
+  }
+
+  // Step 4: Wait a bit more, then start polling
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // Step 5: Launch with polling
+  for (let attempt = 1; attempt <= 6; attempt++) {
     try {
-      console.log(`Launch attempt ${i + 1}/${maxRetries}...`);
-      // Clear any stale webhook/polling state first
-      await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-      await new Promise((r) => setTimeout(r, 1000));
+      console.log(`Polling attempt ${attempt}/6...`);
       await bot.launch({ dropPendingUpdates: true });
-      console.log(`Bot started: @${bot.botInfo?.username}`);
+      console.log("Bot is live and polling!");
       return;
     } catch (err) {
-      console.error(`Launch attempt ${i + 1} failed:`, err?.message || err);
-      if (err?.response?.error_code === 409 && i < maxRetries - 1) {
-        const wait = 5 + (i * 5); // 5s, 10s, 15s, 20s...
-        console.log(`409 conflict, retrying in ${wait}s...`);
+      console.error(`Attempt ${attempt} error:`, err?.message || err);
+      if (err?.response?.error_code === 409 && attempt < 6) {
+        const wait = attempt * 5;
+        console.log(`Waiting ${wait}s before retry...`);
         await new Promise((r) => setTimeout(r, wait * 1000));
       } else {
-        console.error("Bot launch failed permanently:", err);
+        console.error("All launch attempts failed");
         process.exit(1);
       }
     }
   }
 }
-launchWithRetry();
+startBot();
 
 process.once("SIGINT", () => { bot.stop("SIGINT"); redis.disconnect(); });
 process.once("SIGTERM", () => { bot.stop("SIGTERM"); redis.disconnect(); });
