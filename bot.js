@@ -1174,18 +1174,25 @@ async function startBot() {
   // Step 4: Wait a bit more, then start polling
   await new Promise((r) => setTimeout(r, 2000));
 
-  // Step 5: Launch with polling
+  // Step 5: Launch with polling (with timeout)
   for (let attempt = 1; attempt <= 6; attempt++) {
     try {
       console.log(`Polling attempt ${attempt}/6...`);
-      await bot.launch({ dropPendingUpdates: true });
+      const launchPromise = bot.launch({ dropPendingUpdates: true });
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Launch timed out after 15s")), 15000)
+      );
+      await Promise.race([launchPromise, timeoutPromise]);
       console.log("Bot is live and polling!");
       return;
     } catch (err) {
       console.error(`Attempt ${attempt} error:`, err?.message || err);
-      if (err?.response?.error_code === 409 && attempt < 6) {
+      const is409 = err?.response?.error_code === 409;
+      const isTimeout = err?.message?.includes("timed out");
+      if ((is409 || isTimeout) && attempt < 6) {
         const wait = attempt * 5;
-        console.log(`Waiting ${wait}s before retry...`);
+        console.log(`Retrying in ${wait}s...`);
+        try { bot.stop(); } catch (_) {} // Stop any partial polling
         await new Promise((r) => setTimeout(r, wait * 1000));
       } else {
         console.error("All launch attempts failed");
