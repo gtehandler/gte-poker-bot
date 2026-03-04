@@ -1147,19 +1147,24 @@ bot.on("text", async (ctx) => {
    LAUNCH
    ══════════════════════════════════════════════ */
 
+console.log("ENV check — BOT_TOKEN set:", !!process.env.BOT_TOKEN, "REDIS_URL set:", !!process.env.REDIS_URL, "ADMIN_USERS:", process.env.ADMIN_USERS || "(none)");
+console.log("Launching bot...");
+
 async function launchWithRetry(maxRetries = 5) {
   for (let i = 0; i < maxRetries; i++) {
     try {
+      console.log(`Launch attempt ${i + 1}/${maxRetries}...`);
       await bot.launch({ dropPendingUpdates: true });
       console.log(`Bot started: @${bot.botInfo?.username}`);
       return;
     } catch (err) {
+      console.error(`Launch attempt ${i + 1} failed:`, err?.message || err);
       if (err?.response?.error_code === 409 && i < maxRetries - 1) {
         const wait = (i + 1) * 3;
-        console.log(`409 conflict, retrying in ${wait}s... (${i + 1}/${maxRetries})`);
+        console.log(`409 conflict, retrying in ${wait}s...`);
         await new Promise((r) => setTimeout(r, wait * 1000));
       } else {
-        console.error("Bot launch failed:", err);
+        console.error("Bot launch failed permanently:", err);
         process.exit(1);
       }
     }
