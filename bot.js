@@ -1154,19 +1154,14 @@ async function startBot() {
   console.log("Waiting 15s for old container to shut down...");
   await new Promise((r) => setTimeout(r, 15000));
 
-  // Verify token
+  // Verify token works
   const me = await bot.telegram.getMe();
-  bot.botInfo = me;
-  bot.options.username = me.username;
   console.log(`Token OK: @${me.username}`);
 
-  // Clear stale state
-  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-  console.log("Webhook cleared, starting polling...");
-
-  // Start polling manually (bot.launch() hangs on Railway)
-  bot.startPolling();
-  console.log("Bot is live and polling!");
+  // Fire-and-forget: bot.launch() properly initializes middleware + polling
+  // but its promise never resolves on Railway, so we don't await it
+  bot.launch({ dropPendingUpdates: true });
+  console.log("Bot launched (fire-and-forget)!");
 }
 
 startBot().catch((err) => {
