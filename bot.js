@@ -26,7 +26,13 @@ redis.on("connect", () => console.log("Redis connected"));
    HELPERS
    ══════════════════════════════════════════════ */
 function totalIn(r) { return r.buyIn * (1 + (r.rebuys || 0)) + (r.addOns || []).reduce((a, b) => a + b, 0); }
+function totalRebuys(r) { return (r.rebuys || 0) + (r.addOns || []).length; }
 function pl(r) { return r.cashOut - totalIn(r); }
+function plAdj(r, sessions) {
+  const sess = sessions.find(s => s.id === r.sessionId);
+  const bonus = (sess?.transfers || []).filter(t => t.seller === r.player).reduce((sum, t) => sum + t.amount, 0);
+  return (r.cashOut + bonus) - totalIn(r);
+}
 function fmt(n) { return n >= 0 ? `+$${n.toLocaleString()}` : `-$${Math.abs(n).toLocaleString()}`; }
 
 async function getData() {
@@ -80,9 +86,9 @@ function findPlayer(input, players) {
   return null;
 }
 
-function settle(rows) {
+function settle(rows, sessions) {
   const net = {};
-  rows.forEach((r) => { net[r.player] = (net[r.player] || 0) + pl(r); });
+  rows.forEach((r) => { net[r.player] = (net[r.player] || 0) + (sessions ? plAdj(r, sessions) : pl(r)); });
   const debtors = [], creditors = [];
   Object.entries(net).forEach(([p, v]) => {
     if (v < 0) debtors.push({ player: p, amount: -v });
@@ -115,12 +121,12 @@ function getStreak(playerName, results, sessions) {
     .sort((a, b) => a.date.localeCompare(b.date));
   if (pr.length < 2) return { type: null, count: 0 };
   const last = pr[pr.length - 1];
-  const lastPl = pl(last);
+  const lastPl = plAdj(last, sessions);
   if (lastPl === 0) return { type: null, count: 0 };
   const dir = lastPl > 0 ? "hot" : "cold";
   let count = 1;
   for (let i = pr.length - 2; i >= 0; i--) {
-    const n = pl(pr[i]);
+    const n = plAdj(pr[i], sessions);
     if ((dir === "hot" && n > 0) || (dir === "cold" && n < 0)) count++;
     else break;
   }
@@ -132,7 +138,7 @@ function calcPowerRankings(results, sessions) {
   results.forEach((r) => {
     if (!playerMap[r.player]) playerMap[r.player] = { results: [], plValues: [] };
     playerMap[r.player].results.push(r);
-    playerMap[r.player].plValues.push(pl(r));
+    playerMap[r.player].plValues.push(plAdj(r, sessions));
   });
   const totalSessions = sessions.length;
   return Object.entries(playerMap)
@@ -167,13 +173,13 @@ function calcBadges(results, sessions) {
   });
   Object.entries(playerMap).forEach(([name, data]) => {
     const b = [];
-    const plValues = data.results.map((r) => pl(r));
+    const plValues = data.results.map((r) => plAdj(r, sessions));
     if (data.sessionIds.size >= 5) b.push({ id: "ironman", label: "Iron Man", emoji: "\u{1F9BE}", desc: "Attended 5+ sessions" });
-    const hasComebacks = data.results.some((r) => r.rebuys >= 2 && pl(r) > 0);
+    const hasComebacks = data.results.some((r) => totalRebuys(r) >= 2 && plAdj(r, sessions) > 0);
     if (hasComebacks) b.push({ id: "comeback", label: "Comeback Kid", emoji: "\u{1F504}", desc: "Profited after 2+ rebuys" });
-    const noRebuyResults = data.results.filter((r) => r.rebuys === 0);
+    const noRebuyResults = data.results.filter((r) => totalRebuys(r) === 0);
     if (noRebuyResults.length >= 2) {
-      const noRebuyNet = noRebuyResults.reduce((a, r) => a + pl(r), 0);
+      const noRebuyNet = noRebuyResults.reduce((a, r) => a + plAdj(r, sessions), 0);
       const noRebuyIn = noRebuyResults.reduce((a, r) => a + r.buyIn, 0);
       if (noRebuyIn > 0 && noRebuyNet / noRebuyIn > 0.5) b.push({ id: "sniper", label: "Sniper", emoji: "\u{1F3AF}", desc: "50%+ ROI with zero rebuys" });
     }
@@ -182,10 +188,10 @@ function calcBadges(results, sessions) {
       const sb = sessions.find((s) => s.id === b.sessionId);
       return (sa?.date || "").localeCompare(sb?.date || "");
     });
-    if (sorted.length > 0 && pl(sorted[0]) > 0) b.push({ id: "firstblood", label: "First Blood", emoji: "\u{1FA78}", desc: "Won their first session" });
+    if (sorted.length > 0 && plAdj(sorted[0], sessions) > 0) b.push({ id: "firstblood", label: "First Blood", emoji: "\u{1FA78}", desc: "Won their first session" });
     const maxProfit = Math.max(...plValues);
     if (maxProfit >= 500) b.push({ id: "highroller", label: "High Roller", emoji: "\u{1F48E}", desc: `$${maxProfit} single session profit` });
-    const maxRebuys = Math.max(...data.results.map((r) => r.rebuys));
+    const maxRebuys = Math.max(...data.results.map((r) => totalRebuys(r)));
     if (maxRebuys >= 3) b.push({ id: "atm", label: "ATM", emoji: "\u{1F3E7}", desc: `${maxRebuys} rebuys in one session` });
     badges[name] = b;
   });
@@ -206,25 +212,109 @@ function generateTrashTalk(results, sessions, players) {
   results.forEach((r) => {
     if (!playerMap[r.player]) playerMap[r.player] = { results: [], net: 0, rebuys: 0 };
     playerMap[r.player].results.push(r);
-    playerMap[r.player].net += pl(r);
-    playerMap[r.player].rebuys += r.rebuys;
+    playerMap[r.player].net += plAdj(r, sessions);
+    playerMap[r.player].rebuys += totalRebuys(r);
   });
-  Object.entries(playerMap).forEach(([name, data]) => {
+  const allPlayers = Object.entries(playerMap);
+  const totalGroupPot = results.reduce((a, r) => a + totalIn(r), 0);
+
+  allPlayers.forEach(([name, data]) => {
     const streak = getStreak(name, results, sessions);
     const d = dn(name, players);
-    if (streak.type === "cold" && streak.count >= 2) msgs.push(`${d} has lost ${streak.count} sessions in a row \u{1F480}`);
-    if (streak.type === "hot" && streak.count >= 2) msgs.push(`${d} just won't stop winning \u{1F525}`);
+    const wins = data.results.filter((r) => plAdj(r, sessions) > 0).length;
+    const winRate = data.results.length ? Math.round((wins / data.results.length) * 100) : 0;
+    const totalInvested = data.results.reduce((a, r) => a + totalIn(r), 0);
+    const roi = totalInvested > 0 ? Math.round(((data.net) / totalInvested) * 100) : 0;
+
+    // Streaks
+    if (streak.type === "cold" && streak.count >= 4) msgs.push(`${d} has lost ${streak.count} sessions straight... maybe try a different hobby \u{1F3F3}\u{FE0F}`);
+    else if (streak.type === "cold" && streak.count >= 2) msgs.push(`${d} has lost ${streak.count} sessions in a row \u{1F480}`);
+    if (streak.type === "hot" && streak.count >= 4) msgs.push(`${d} is on a ${streak.count}-session heater... absolutely disgusting \u{1F60E}`);
+    else if (streak.type === "hot" && streak.count >= 2) msgs.push(`${d} just won't stop winning \u{1F525}`);
+
+    // Net profit
     if (data.net > 0 && data.results.length >= 2) msgs.push(`${d} is up $${data.net.toLocaleString()} all-time... must be nice \u{1F3C1}`);
-    if (data.rebuys >= 3) msgs.push(`${d} has ${data.rebuys} lifetime rebuys... someone call the bank \u{1F3E7}`);
-    const winRate = data.results.length ? Math.round((data.results.filter((r) => pl(r) > 0).length / data.results.length) * 100) : 0;
+
+    // Rebuys
+    if (data.rebuys >= 5) msgs.push(`${d} has ${data.rebuys} lifetime rebuys... ATM is on speed dial \u{1F4B8}`);
+    else if (data.rebuys >= 3) msgs.push(`${d} has ${data.rebuys} lifetime rebuys... someone call the bank \u{1F3E7}`);
+    if (data.rebuys === 1) msgs.push(`${d} has only rebuyed once ever... iron discipline or just lucky? \u{1F9CA}`);
+    const maxSessionRebuys = Math.max(...data.results.map(r => totalRebuys(r)));
+    if (maxSessionRebuys >= 3) msgs.push(`${d} once fired ${maxSessionRebuys} bullets in a single session \u{1F52B}`);
+
+    // Win rate extremes
     if (winRate <= 25 && data.results.length >= 2) msgs.push(`${d}'s win rate is only ${winRate}%... thoughts and prayers \u{1F64F}`);
     if (winRate >= 75 && data.results.length >= 2) msgs.push(`${d} wins ${winRate}% of the time... are they cheating? \u{1F914}`);
-    if (data.net < -500) msgs.push(`${d} is stuck $${Math.abs(data.net).toLocaleString()}... it's just a bad run, right? \u{1F62C}`);
+    if (winRate === 50 && data.results.length >= 4) msgs.push(`${d} is exactly 50/50... perfectly balanced, as all things should be \u{2696}\u{FE0F}`);
+
+    // Deep losses
+    if (data.net < -1000) msgs.push(`${d} is down $${Math.abs(data.net).toLocaleString()}... that's rent money \u{1F62D}`);
+    else if (data.net < -500) msgs.push(`${d} is stuck $${Math.abs(data.net).toLocaleString()}... it's just a bad run, right? \u{1F62C}`);
+    else if (data.net < -200 && data.results.length >= 2) msgs.push(`${d} is $${Math.abs(data.net).toLocaleString()} in the hole... we accept Venmo \u{1F4B3}`);
+
+    // ROI
+    if (roi < -50 && data.results.length >= 3) msgs.push(`${d}'s ROI is ${roi}%... might want to read a strategy book \u{1F4DA}`);
+
+    // First-timer
+    if (data.results.length === 1) {
+      const p = plAdj(data.results[0], sessions);
+      if (p > 0) msgs.push(`${d} won their only session ever... beginner's luck or the real deal? \u{1F52E}`);
+      else if (p < 0) msgs.push(`${d} lost their first (and only) session... welcome to poker \u{1F44B}`);
+    }
+
+    // Most sessions attended
+    if (data.results.length >= sessions.length && sessions.length >= 3) msgs.push(`${d} has played every single session... true degen \u{1F3B0}`);
+    else if (data.results.length >= sessions.length - 1 && sessions.length >= 4) msgs.push(`${d} has near-perfect attendance... never misses a game \u{1F4C5}`);
+
+    // Comeback king
+    const comebacks = data.results.filter(r => totalRebuys(r) >= 2 && plAdj(r, sessions) > 0);
+    if (comebacks.length > 0) msgs.push(`${d} has come back from 2+ rebuys to profit ${comebacks.length} time${comebacks.length > 1 ? "s" : ""}... never count them out \u{1F4AA}`);
+
+    // High variance
+    if (data.results.length >= 3) {
+      const pls = data.results.map(r => plAdj(r, sessions));
+      const avg = pls.reduce((a, b) => a + b, 0) / pls.length;
+      const variance = pls.reduce((a, v) => a + Math.pow(v - avg, 2), 0) / pls.length;
+      const stdDev = Math.sqrt(variance);
+      if (stdDev > 300) msgs.push(`${d} swings wild every session... chaos incarnate \u{1F32A}\u{FE0F}`);
+      else if (stdDev < 50 && data.results.length >= 4) msgs.push(`${d} always hovers around break-even... the human flat line \u{1F4C9}`);
+    }
+
+    // Improving / declining trend
+    if (data.results.length >= 4) {
+      const sorted = [...data.results].sort((a, b) => {
+        const sa = sessions.find(s => s.id === a.sessionId);
+        const sb = sessions.find(s => s.id === b.sessionId);
+        return (sa?.date || "").localeCompare(sb?.date || "");
+      });
+      const recent3 = sorted.slice(-3).map(r => plAdj(r, sessions));
+      const earlier = sorted.slice(0, -3).map(r => plAdj(r, sessions));
+      const recentAvg = recent3.reduce((a, b) => a + b, 0) / recent3.length;
+      const earlierAvg = earlier.length ? earlier.reduce((a, b) => a + b, 0) / earlier.length : 0;
+      if (recentAvg > earlierAvg + 100) msgs.push(`${d} has been on fire lately... trending up hard \u{1F4C8}`);
+      if (recentAvg < earlierAvg - 100) msgs.push(`${d} is trending down bad... the wheels are falling off \u{1F6DE}`);
+    }
   });
+
+  // Global records
   if (results.length > 0) {
-    const biggestWin = results.reduce((a, b) => (pl(a) > pl(b) ? a : b));
-    if (pl(biggestWin) > 0) msgs.push(`Biggest single win ever: ${dn(biggestWin.player, players)} took $${pl(biggestWin).toLocaleString()} in one session \u{1F4B0}`);
+    const biggestWin = results.reduce((a, b) => (plAdj(a, sessions) > plAdj(b, sessions) ? a : b));
+    if (plAdj(biggestWin, sessions) > 0) msgs.push(`Biggest single win ever: ${dn(biggestWin.player, players)} took $${plAdj(biggestWin, sessions).toLocaleString()} in one session \u{1F4B0}`);
+    const biggestLoss = results.reduce((a, b) => (plAdj(a, sessions) < plAdj(b, sessions) ? a : b));
+    if (plAdj(biggestLoss, sessions) < 0) msgs.push(`Worst single session: ${dn(biggestLoss.player, players)} lost $${Math.abs(plAdj(biggestLoss, sessions)).toLocaleString()} in one sitting \u{1F4A9}`);
   }
+
+  // Session size records
+  sessions.forEach(s => {
+    const count = results.filter(r => r.sessionId === s.id).length;
+    if (count >= 8) msgs.push(`S${s.id} had ${count} players at the table... absolute madhouse \u{1F3DF}\u{FE0F}`);
+    else if (count >= 6) msgs.push(`S${s.id} got ${count} players together... full ring energy \u{1F4A5}`);
+  });
+
+  // Group pot milestone
+  if (totalGroupPot >= 10000) msgs.push(`The group has put $${totalGroupPot.toLocaleString()} total across all sessions... we could've bought a car \u{1F697}`);
+  else if (totalGroupPot >= 5000) msgs.push(`$${totalGroupPot.toLocaleString()} total pot across all sessions... poker economy is thriving \u{1F4B5}`);
+
   return msgs.length > 0 ? msgs : ["No trash talk yet... play more sessions! \u{1F0CF}"];
 }
 
@@ -238,12 +328,12 @@ function calcH2H(player1, player2, results, sessions) {
   const breakdown = shared.map((s) => {
     const r1 = results.find((r) => r.player === player1 && r.sessionId === s.id);
     const r2 = results.find((r) => r.player === player2 && r.sessionId === s.id);
-    return { num: sessions.indexOf(s) + 1, date: s.date, p1pl: r1 ? pl(r1) : 0, p2pl: r2 ? pl(r2) : 0 };
+    return { num: s.id, date: s.date, p1pl: r1 ? plAdj(r1, sessions) : 0, p2pl: r2 ? plAdj(r2, sessions) : 0 };
   });
   return {
     shared: shared.length,
-    p1: { net: p1r.reduce((a, r) => a + pl(r), 0), wins: p1r.filter((r) => pl(r) > 0).length },
-    p2: { net: p2r.reduce((a, r) => a + pl(r), 0), wins: p2r.filter((r) => pl(r) > 0).length },
+    p1: { net: p1r.reduce((a, r) => a + plAdj(r, sessions), 0), wins: p1r.filter((r) => plAdj(r, sessions) > 0).length },
+    p2: { net: p2r.reduce((a, r) => a + plAdj(r, sessions), 0), wins: p2r.filter((r) => plAdj(r, sessions) > 0).length },
     breakdown,
   };
 }
@@ -264,7 +354,7 @@ function calcLocationStats(sessions, results) {
     const totalPot = data.results.reduce((a, r) => a + totalIn(r), 0);
     const avgPot = data.sessions.length ? Math.round(totalPot / data.sessions.length) : 0;
     const playerNets = {};
-    data.results.forEach((r) => { playerNets[r.player] = (playerNets[r.player] || 0) + pl(r); });
+    data.results.forEach((r) => { playerNets[r.player] = (playerNets[r.player] || 0) + plAdj(r, sessions); });
     const sorted = Object.entries(playerNets).sort((a, b) => b[1] - a[1]);
     return {
       location: loc, sessionCount: data.sessions.length, totalPot, avgPot,
@@ -273,11 +363,11 @@ function calcLocationStats(sessions, results) {
   });
 }
 
-function calcHallOfFame(results) {
+function calcHallOfFame(results, sessions) {
   if (results.length === 0) return null;
-  const best = results.reduce((a, b) => (pl(a) > pl(b) ? a : b));
-  const worst = results.reduce((a, b) => (pl(a) < pl(b) ? a : b));
-  return { best: { player: best.player, amount: pl(best), sessionId: best.sessionId }, worst: { player: worst.player, amount: pl(worst), sessionId: worst.sessionId } };
+  const best = results.reduce((a, b) => (plAdj(a, sessions) > plAdj(b, sessions) ? a : b));
+  const worst = results.reduce((a, b) => (plAdj(a, sessions) < plAdj(b, sessions) ? a : b));
+  return { best: { player: best.player, amount: plAdj(best, sessions), sessionId: best.sessionId }, worst: { player: worst.player, amount: plAdj(worst, sessions), sessionId: worst.sessionId } };
 }
 
 /* ══════════════════════════════════════════════
@@ -418,7 +508,10 @@ bot.command("start", async (ctx) => {
       `/newsession — Create session\n` +
       `/addresult — Add a result\n` +
       `/delsession &lt;#&gt; — Delete session\n` +
-      `/delresult &lt;#&gt; — Delete result\n\n` : "") +
+      `/delresult &lt;#&gt; — Delete result\n` +
+      `/closesession — Complete session\n` +
+      `/reopensession — Reopen session\n` +
+      `/transfer &lt;buyer&gt; &lt;seller&gt; &lt;amt&gt; — Record chip transfer\n\n` : "") +
     `\u{1F310} <a href="https://gte-poker.vercel.app">Open Web App</a>`,
     { parse_mode: "HTML", disable_web_page_preview: true }
   );
@@ -478,7 +571,7 @@ bot.command("lb", async (ctx) => {
     const map = {};
     results.forEach((r) => {
       if (!map[r.player]) map[r.player] = { player: r.player, net: 0, sessions: 0, wins: 0 };
-      const n = pl(r);
+      const n = plAdj(r, sessions);
       map[r.player].net += n;
       map[r.player].sessions += 1;
       if (n > 0) map[r.player].wins += 1;
@@ -503,13 +596,13 @@ bot.command("stats", async (ctx) => {
     if (!target) return ctx.reply(`Player "${nameArg}" not found.`);
     const pr = results.filter((r) => r.player === target);
     if (pr.length === 0) return ctx.reply(`No results found for ${target}.`);
-    const net = pr.reduce((a, r) => a + pl(r), 0);
-    const wins = pr.filter((r) => pl(r) > 0).length;
+    const net = pr.reduce((a, r) => a + plAdj(r, sessions), 0);
+    const wins = pr.filter((r) => plAdj(r, sessions) > 0).length;
     const avg = Math.round(net / pr.length);
     const totalBuyIns = pr.reduce((a, r) => a + totalIn(r), 0);
-    const totalRebuys = pr.reduce((a, r) => a + r.rebuys, 0);
-    const bestResult = pr.reduce((a, b) => (pl(a) > pl(b) ? a : b));
-    const worstResult = pr.reduce((a, b) => (pl(a) < pl(b) ? a : b));
+    const totalRb = pr.reduce((a, r) => a + totalRebuys(r), 0);
+    const bestResult = pr.reduce((a, b) => (plAdj(a, sessions) > plAdj(b, sessions) ? a : b));
+    const worstResult = pr.reduce((a, b) => (plAdj(a, sessions) < plAdj(b, sessions) ? a : b));
     const streak = getStreak(target, results, sessions);
     const streakText = streak.type === "hot" ? ` \u{1F525} ${streak.count}W streak` : streak.type === "cold" ? ` \u{1F9CA} ${streak.count}L streak` : "";
 
@@ -519,9 +612,9 @@ bot.command("stats", async (ctx) => {
     text += `\u{1F3AF} Win Rate: ${Math.round((wins / pr.length) * 100)}%\n`;
     text += `\u{1F4C8} Avg P/L: ${fmt(avg)}\n`;
     text += `\u{1F4B5} Total Invested: $${totalBuyIns.toLocaleString()}\n`;
-    text += `\u{1F504} Total Rebuys: ${totalRebuys}\n`;
-    text += `\u{1F4AA} Best Session: ${fmt(pl(bestResult))}\n`;
-    text += `\u{1F915} Worst Session: ${fmt(pl(worstResult))}\n`;
+    text += `\u{1F504} Total Rebuys: ${totalRb}\n`;
+    text += `\u{1F4AA} Best Session: ${fmt(plAdj(bestResult, sessions))}\n`;
+    text += `\u{1F915} Worst Session: ${fmt(plAdj(worstResult, sessions))}\n`;
     ctx.reply(text, { parse_mode: "HTML" });
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
 });
@@ -532,8 +625,8 @@ bot.command("pnl", async (ctx) => {
     const target = ctx.state.playerName;
     const pr = results.filter((r) => r.player === target);
     if (pr.length === 0) return ctx.reply("You have no results yet.");
-    const net = pr.reduce((a, r) => a + pl(r), 0);
-    const wins = pr.filter((r) => pl(r) > 0).length;
+    const net = pr.reduce((a, r) => a + plAdj(r, sessions), 0);
+    const wins = pr.filter((r) => plAdj(r, sessions) > 0).length;
     const avg = Math.round(net / pr.length);
     const streak = getStreak(target, results, sessions);
     const streakText = streak.type === "hot" ? `\u{1F525} ${streak.count}W streak` : streak.type === "cold" ? `\u{1F9CA} ${streak.count}L streak` : "No streak";
@@ -552,7 +645,7 @@ bot.command("pnl", async (ctx) => {
     text += `Avg: ${fmt(avg)} per session\n\n`;
     text += `<b>Recent:</b>\n`;
     recent.forEach((r) => {
-      const n = pl(r);
+      const n = plAdj(r, sessions);
       const emoji = n >= 0 ? "\u{1F7E2}" : "\u{1F534}";
       text += `${emoji} ${r.date} — ${fmt(n)}\n`;
     });
@@ -565,10 +658,10 @@ bot.command("livesession", async (ctx) => {
     const { sessions, results, players } = await getData();
     if (sessions.length === 0) return ctx.reply("No sessions yet.");
     const latest = sessions[sessions.length - 1];
-    const num = sessions.length;
+    if (latest.completed) return ctx.reply(`No live session. The most recent session (S${latest.id}) is completed.`);
     const sr = results.filter((r) => r.sessionId === latest.id);
 
-    let text = `\u{1F3B0} <b>LIVE SESSION — S${num}</b>\n`;
+    let text = `\u{1F3B0} <b>LIVE SESSION — S${latest.id}</b>\n`;
     text += `${latest.date} | ${latest.host} | ${latest.gameType} ${latest.stakes}\n\u{1F4CD} ${latest.location}\n\n`;
 
     if (sr.length === 0) {
@@ -576,14 +669,14 @@ bot.command("livesession", async (ctx) => {
     } else {
       let totalPot = 0;
       let stillPlaying = 0;
-      sr.sort((a, b) => pl(b) - pl(a));
+      sr.sort((a, b) => plAdj(b, sessions) - plAdj(a, sessions));
       sr.forEach((r) => {
         totalPot += totalIn(r);
         const rebuyCount = (r.rebuys || 0) + (r.addOns || []).length;
         const rebuyText = rebuyCount > 0 ? ` (${rebuyCount} rebuy${rebuyCount > 1 ? "s" : ""})` : "";
         const settled = r.settled != null ? r.settled : r.cashOut > 0;
         if (settled) {
-          const n = pl(r);
+          const n = plAdj(r, sessions);
           text += `${dn(r.player, players)}\n   In: $${totalIn(r)}${rebuyText} | Out: $${r.cashOut} | <b>${fmt(n)}</b>\n\n`;
         } else {
           stillPlaying++;
@@ -603,8 +696,8 @@ bot.command("sessions", async (ctx) => {
     const { sessions } = await getData();
     if (sessions.length === 0) return ctx.reply("No sessions yet.");
     let text = "\u{1F4C5} <b>SESSIONS</b>\n\n";
-    [...sessions].reverse().forEach((s, idx, arr) => {
-      text += `<b>S${arr.length - idx}</b> | ${s.date} | ${s.host} | ${s.gameType} ${s.stakes}\n   \u{1F4CD} ${s.location}\n\n`;
+    [...sessions].reverse().forEach((s) => {
+      text += `<b>S${s.id}</b> | ${s.date} | ${s.host} | ${s.gameType} ${s.stakes}\n   \u{1F4CD} ${s.location}\n\n`;
     });
     ctx.reply(text, { parse_mode: "HTML" });
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
@@ -614,15 +707,18 @@ bot.command("results", async (ctx) => {
   try {
     const num = parseInt(ctx.message.text.split(" ")[1]);
     const { sessions, results, players } = await getData();
-    if (!num || num < 1 || num > sessions.length) return ctx.reply(`Usage: /results <1-${sessions.length}>`);
-    const sess = sessions[num - 1];
+    const sess = sessions.find((s) => s.id === num);
+    if (!sess) {
+      const ids = sessions.map((s) => s.id).join(", ");
+      return ctx.reply(`Usage: /results <session id>\nAvailable: ${ids}`);
+    }
     const sr = results.filter((r) => r.sessionId === sess.id);
-    if (sr.length === 0) return ctx.reply(`No results for S${num}.`);
-    let text = `\u{1F3B2} <b>S${num} — ${sess.date}</b>\n${sess.host} | ${sess.gameType} ${sess.stakes} | ${sess.location}\n\n`;
-    sr.sort((a, b) => pl(b) - pl(a));
+    if (sr.length === 0) return ctx.reply(`No results for S${sess.id}.`);
+    let text = `\u{1F3B2} <b>S${sess.id} — ${sess.date}</b>\n${sess.host} | ${sess.gameType} ${sess.stakes} | ${sess.location}\n\n`;
+    sr.sort((a, b) => plAdj(b, sessions) - plAdj(a, sessions));
     const best = sr[0];
     sr.forEach((r) => {
-      const n = pl(r);
+      const n = plAdj(r, sessions);
       const mvp = r.id === best.id && n > 0 ? " \u{1F3C6}" : "";
       text += `${dn(r.player, players)}${mvp}\n   In: $${totalIn(r)} | Out: $${r.cashOut} | <b>${fmt(n)}</b>\n\n`;
     });
@@ -632,9 +728,9 @@ bot.command("results", async (ctx) => {
 
 bot.command("settlements", async (ctx) => {
   try {
-    const { results, players } = await getData();
+    const { results, sessions, players } = await getData();
     if (results.length === 0) return ctx.reply("No results yet.");
-    const { txns } = settle(results);
+    const { txns } = settle(results, sessions);
     if (txns.length === 0) return ctx.reply("No settlements needed.");
     let text = "\u{1F4B8} <b>ALL-TIME SETTLEMENTS</b>\n\n";
     txns.forEach((t) => {
@@ -679,20 +775,20 @@ bot.command("summary", async (ctx) => {
     const map = {};
     results.forEach((r) => {
       if (!map[r.player]) map[r.player] = { net: 0, sessions: 0 };
-      map[r.player].net += pl(r);
+      map[r.player].net += plAdj(r, sessions);
       map[r.player].sessions += 1;
     });
     const sorted = Object.entries(map).sort((a, b) => b[1].net - a[1].net);
-    const bigWin = results.reduce((a, b) => (pl(a) > pl(b) ? a : b));
-    const bigLoss = results.reduce((a, b) => (pl(a) < pl(b) ? a : b));
+    const bigWin = results.reduce((a, b) => (plAdj(a, sessions) > plAdj(b, sessions) ? a : b));
+    const bigLoss = results.reduce((a, b) => (plAdj(a, sessions) < plAdj(b, sessions) ? a : b));
 
     let text = `\u{1F3B0} <b>GTE POKER SUMMARY</b>\n\n`;
     text += `\u{1F4CA} ${sessions.length} sessions | ${results.length} results | ${players.length} players\n`;
     text += `\u{1F4B0} Total pot: $${totalPot.toLocaleString()}\n\n`;
     text += `\u{1F451} Top earner: ${dn(sorted[0][0], players)} (${fmt(sorted[0][1].net)})\n`;
     text += `\u{1F4A9} Biggest loser: ${dn(sorted[sorted.length - 1][0], players)} (${fmt(sorted[sorted.length - 1][1].net)})\n`;
-    text += `\u{1F4AA} Best single session: ${dn(bigWin.player, players)} ${fmt(pl(bigWin))}\n`;
-    text += `\u{1F915} Worst single session: ${dn(bigLoss.player, players)} ${fmt(pl(bigLoss))}\n`;
+    text += `\u{1F4AA} Best single session: ${dn(bigWin.player, players)} ${fmt(plAdj(bigWin, sessions))}\n`;
+    text += `\u{1F915} Worst single session: ${dn(bigLoss.player, players)} ${fmt(plAdj(bigLoss, sessions))}\n`;
     if (nextGame) {
       text += `\n\u{1F3AE} Next game: ${nextGame.date} at ${nextGame.time || "TBD"} \u{2014} ${(nextGame.confirmed || []).length} confirmed`;
     }
@@ -814,10 +910,10 @@ bot.command("locations", async (ctx) => {
 bot.command("hof", async (ctx) => {
   try {
     const { results, sessions, players } = await getData();
-    const hof = calcHallOfFame(results);
+    const hof = calcHallOfFame(results, sessions);
     if (!hof) return ctx.reply("No results yet.");
-    const bestSessNum = sessions.findIndex((s) => s.id === hof.best.sessionId) + 1;
-    const worstSessNum = sessions.findIndex((s) => s.id === hof.worst.sessionId) + 1;
+    const bestSessNum = hof.best.sessionId;
+    const worstSessNum = hof.worst.sessionId;
     let text = `\u{1F3C6} <b>HALL OF FAME</b>\n\n`;
     text += `\u{1F451} Best Single Session\n`;
     text += `   ${dn(hof.best.player, players)} — <b>${fmt(hof.best.amount)}</b> (S${bestSessNum})\n\n`;
@@ -913,6 +1009,7 @@ bot.command("buyin", async (ctx) => {
     const data = await getData();
     if (data.sessions.length === 0) return ctx.reply("No active session. Ask an admin to create one with /newsession");
     const latest = data.sessions[data.sessions.length - 1];
+    if (latest.completed) return ctx.reply("The current session is completed. Ask an admin to create a new session with /newsession");
     const name = ctx.state.playerName;
 
     const existing = data.results.find((r) => r.sessionId === latest.id && r.player === name);
@@ -933,8 +1030,7 @@ bot.command("buyin", async (ctx) => {
       data.results.push(result);
       data.counters.nextRId = id + 1;
       await saveData(data);
-      const sessNum = data.sessions.length;
-      const msg = `\u{1F4B5} ${dn(name, data.players)} bought in for $${amount} (S${sessNum})`;
+      const msg = `\u{1F4B5} ${dn(name, data.players)} bought in for $${amount} (S${latest.id})`;
       ctx.reply(msg, { parse_mode: "HTML" });
       notify(msg);
     }
@@ -946,6 +1042,7 @@ bot.command("rebuy", async (ctx) => {
     const data = await getData();
     if (data.sessions.length === 0) return ctx.reply("No active session.");
     const latest = data.sessions[data.sessions.length - 1];
+    if (latest.completed) return ctx.reply("The current session is completed.");
     const name = ctx.state.playerName;
 
     const existing = data.results.find((r) => r.sessionId === latest.id && r.player === name);
@@ -973,6 +1070,7 @@ bot.command("cashout", async (ctx) => {
     const data = await getData();
     if (data.sessions.length === 0) return ctx.reply("No active session.");
     const latest = data.sessions[data.sessions.length - 1];
+    if (latest.completed) return ctx.reply("The current session is completed.");
     const name = ctx.state.playerName;
 
     const existing = data.results.find((r) => r.sessionId === latest.id && r.player === name);
@@ -981,7 +1079,7 @@ bot.command("cashout", async (ctx) => {
     existing.cashOut = amount;
     existing.settled = true;
     await saveData(data);
-    const n = pl(existing);
+    const n = plAdj(existing, data.sessions);
     const emoji = n >= 0 ? "\u{1F7E2}" : "\u{1F534}";
     const msg = `${emoji} ${dn(name, data.players)} cashed out $${amount}\nP/L: <b>${fmt(n)}</b>`;
     ctx.reply(msg, { parse_mode: "HTML" });
@@ -1005,8 +1103,8 @@ bot.command("addresult", async (ctx) => {
     const { sessions } = await getData();
     if (sessions.length === 0) return ctx.reply("No sessions yet. Create one first with /newsession");
     conversations[ctx.from.id] = { type: "addresult", step: 0, data: {} };
-    let sessionList = "Which session? Send the number:\n\n";
-    sessions.forEach((s, i) => { sessionList += `<b>${i + 1}</b> \u{2014} ${s.date} (${s.gameType} ${s.stakes})\n`; });
+    let sessionList = "Which session? Send the session ID:\n\n";
+    sessions.forEach((s) => { sessionList += `<b>S${s.id}</b> \u{2014} ${s.date} (${s.gameType} ${s.stakes})\n`; });
     ctx.reply(`\u{1F4DD} <b>Add Result</b>\n\n${sessionList}`, { parse_mode: "HTML" });
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
 });
@@ -1016,12 +1114,15 @@ bot.command("delsession", async (ctx) => {
   try {
     const num = parseInt(ctx.message.text.split(" ")[1]);
     const data = await getData();
-    if (!num || num < 1 || num > data.sessions.length) return ctx.reply(`Usage: /delsession <1-${data.sessions.length}>`);
-    const sess = data.sessions[num - 1];
+    const sess = data.sessions.find((s) => s.id === num);
+    if (!sess) {
+      const ids = data.sessions.map((s) => s.id).join(", ");
+      return ctx.reply(`Usage: /delsession <session id>\nAvailable: ${ids}`);
+    }
     data.sessions = data.sessions.filter((s) => s.id !== sess.id);
     data.results = data.results.filter((r) => r.sessionId !== sess.id);
     await saveData(data);
-    const msg = `\u{1F5D1} Deleted session S${num} (${sess.date} \u{2014} ${sess.gameType})`;
+    const msg = `\u{1F5D1} Deleted session S${sess.id} (${sess.date} \u{2014} ${sess.gameType})`;
     ctx.reply(msg);
     notify(msg);
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
@@ -1038,6 +1139,89 @@ bot.command("delresult", async (ctx) => {
     data.results = data.results.filter((r) => r.id !== target.id);
     await saveData(data);
     const msg = `\u{1F5D1} Deleted result: ${target.player} from session ${target.sessionId}`;
+    ctx.reply(msg);
+    notify(msg);
+  } catch (e) { ctx.reply(`Error: ${e.message}`); }
+});
+
+bot.command("closesession", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("\u{1F6AB} Admin only.");
+  try {
+    const data = await getData();
+    if (data.sessions.length === 0) return ctx.reply("No sessions.");
+    const latest = data.sessions[data.sessions.length - 1];
+    if (latest.completed) return ctx.reply(`S${latest.id} is already completed.`);
+    latest.completed = true;
+    await saveData(data);
+    const msg = `\u{2705} Session S${latest.id} is now completed.`;
+    ctx.reply(msg);
+    notify(msg);
+  } catch (e) { ctx.reply(`Error: ${e.message}`); }
+});
+
+bot.command("reopensession", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("\u{1F6AB} Admin only.");
+  try {
+    const data = await getData();
+    if (data.sessions.length === 0) return ctx.reply("No sessions.");
+    const latest = data.sessions[data.sessions.length - 1];
+    if (!latest.completed) return ctx.reply(`S${latest.id} is already active.`);
+    latest.completed = false;
+    await saveData(data);
+    const msg = `\u{1F504} Session S${latest.id} has been reopened.`;
+    ctx.reply(msg);
+    notify(msg);
+  } catch (e) { ctx.reply(`Error: ${e.message}`); }
+});
+
+/* ── /transfer <buyer> <seller> <amount> ── */
+bot.command("transfer", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("\u{1F6AB} Admin only.");
+  try {
+    const data = await getData();
+    if (data.sessions.length === 0) return ctx.reply("No sessions.");
+    const latest = data.sessions[data.sessions.length - 1];
+    if (latest.completed) return ctx.reply(`S${latest.id} is completed. Reopen it first.`);
+
+    const args = ctx.message.text.split(/\s+/).slice(1);
+    if (args.length < 3) return ctx.reply("Usage: /transfer <buyer> <seller> <amount>\nBuyer = gets chips, Seller = gives chips from their stack.");
+
+    const amountStr = args[args.length - 1];
+    const amount = Number(amountStr);
+    if (!amount || amount <= 0) return ctx.reply("Amount must be a positive number.");
+
+    // Try to match buyer and seller from remaining args (handle multi-word names)
+    // Simple case: /transfer Alice Bob 200
+    const buyerName = findPlayer(args[0], data.players);
+    const sellerName = findPlayer(args[args.length - 2], data.players);
+    if (!buyerName) return ctx.reply(`Player "${args[0]}" not found. Check /players.`);
+    if (!sellerName) return ctx.reply(`Player "${args[args.length - 2]}" not found. Check /players.`);
+    if (buyerName === sellerName) return ctx.reply("Buyer and seller must be different players.");
+
+    const liveResults = data.results.filter(r => r.sessionId === latest.id);
+    const sellerResult = liveResults.find(r => r.player === sellerName);
+    if (sellerResult && sellerResult.settled !== false) return ctx.reply(`${sellerName} has already cashed out — can't transfer from them.`);
+    if (!sellerResult) return ctx.reply(`${sellerName} is not in the live session.`);
+
+    // Add transfer to session
+    if (!latest.transfers) latest.transfers = [];
+    latest.transfers.push({ buyer: buyerName, seller: sellerName, amount });
+
+    // Add addOn to buyer's result (or create new result)
+    const buyerResult = liveResults.find(r => r.player === buyerName);
+    if (buyerResult) {
+      const br = data.results.find(r => r.id === buyerResult.id);
+      if (!br.addOns) br.addOns = [];
+      br.addOns.push(amount);
+      br.settled = false;
+    } else {
+      const newResult = { id: data.counters.nextRId, sessionId: latest.id, player: buyerName, buyIn: amount, rebuys: 0, cashOut: 0, addOns: [], settled: false };
+      data.results.push(newResult);
+      data.counters.nextRId++;
+    }
+
+    await saveData(data);
+    const msg = `\u{1F4B1} Transfer recorded for S${latest.id}:\n${dn(buyerName, data.players)} bought $${amount} in chips from ${dn(sellerName, data.players)}`;
     ctx.reply(msg);
     notify(msg);
   } catch (e) { ctx.reply(`Error: ${e.message}`); }
@@ -1099,7 +1283,7 @@ bot.on("text", async (ctx) => {
         data.counters.nextSId = id + 1;
         await saveData(data);
         delete conversations[userId];
-        const msg = `\u{2705} Session S${data.sessions.length} created!\n\n\u{1F4C5} ${sess.date} | ${sess.host}\n\u{1F3AE} ${sess.gameType} ${sess.stakes}\n\u{1F4CD} ${sess.location}\n\nPlayers: use /buyin <amount> to join!`;
+        const msg = `\u{2705} Session S${sess.id} created!\n\n\u{1F4C5} ${sess.date} | ${sess.host}\n\u{1F3AE} ${sess.gameType} ${sess.stakes}\n\u{1F4CD} ${sess.location}\n\nPlayers: use /buyin <amount> to join!`;
         ctx.reply(msg);
         notify(msg);
         return;
@@ -1111,9 +1295,13 @@ bot.on("text", async (ctx) => {
       const data = await getData();
       if (conv.step === 0) {
         const num = parseInt(text);
-        if (!num || num < 1 || num > data.sessions.length) return ctx.reply(`Send a number 1-${data.sessions.length}:`);
-        conv.data.sessionId = data.sessions[num - 1].id;
-        conv.data.sessionNum = num;
+        const sess = data.sessions.find((s) => s.id === num);
+        if (!sess) {
+          const ids = data.sessions.map((s) => s.id).join(", ");
+          return ctx.reply(`Send a valid session ID (${ids}):`);
+        }
+        conv.data.sessionId = sess.id;
+        conv.data.sessionNum = sess.id;
         conv.step = 1;
         let playerList = "Player? Send number or name:\n\n";
         data.players.forEach((p, i) => { playerList += `${i + 1}. ${p.avatar || "\u{1F3AD}"} ${p.name}\n`; });
@@ -1146,12 +1334,12 @@ bot.on("text", async (ctx) => {
         if (isNaN(val) || val < 0) return ctx.reply("Send a valid dollar amount:");
         conv.data.cashOut = val;
         const id = data.counters.nextRId || data.results.length + 1;
-        const result = { id, sessionId: conv.data.sessionId, player: conv.data.player, buyIn: conv.data.buyIn, rebuys: conv.data.rebuys, cashOut: conv.data.cashOut };
+        const result = { id, sessionId: conv.data.sessionId, player: conv.data.player, buyIn: conv.data.buyIn, rebuys: conv.data.rebuys, cashOut: conv.data.cashOut, addOns: [], settled: conv.data.cashOut > 0 };
         data.results.push(result);
         data.counters.nextRId = id + 1;
         await saveData(data);
         delete conversations[userId];
-        const n = pl(result);
+        const n = plAdj(result, data.sessions);
         const msg = `\u{2705} Result added to S${conv.data.sessionNum}\n\n${dn(result.player, data.players)}\nBuy-in: $${result.buyIn} | Rebuys: ${result.rebuys} | Cash-out: $${result.cashOut}\nP/L: <b>${fmt(n)}</b>`;
         ctx.reply(msg, { parse_mode: "HTML" });
         notify(msg);
