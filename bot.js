@@ -1148,19 +1148,25 @@ bot.on("text", async (ctx) => {
    ══════════════════════════════════════════════ */
 
 console.log("ENV check — BOT_TOKEN set:", !!process.env.BOT_TOKEN, "REDIS_URL set:", !!process.env.REDIS_URL, "ADMIN_USERS:", process.env.ADMIN_USERS || "(none)");
-console.log("Launching bot...");
 
-async function launchWithRetry(maxRetries = 5) {
+async function launchWithRetry(maxRetries = 8) {
+  // Wait 10s on startup to let old container die during Railway deploys
+  console.log("Waiting 10s for old container to shut down...");
+  await new Promise((r) => setTimeout(r, 10000));
+
   for (let i = 0; i < maxRetries; i++) {
     try {
       console.log(`Launch attempt ${i + 1}/${maxRetries}...`);
+      // Clear any stale webhook/polling state first
+      await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+      await new Promise((r) => setTimeout(r, 1000));
       await bot.launch({ dropPendingUpdates: true });
       console.log(`Bot started: @${bot.botInfo?.username}`);
       return;
     } catch (err) {
       console.error(`Launch attempt ${i + 1} failed:`, err?.message || err);
       if (err?.response?.error_code === 409 && i < maxRetries - 1) {
-        const wait = (i + 1) * 3;
+        const wait = 5 + (i * 5); // 5s, 10s, 15s, 20s...
         console.log(`409 conflict, retrying in ${wait}s...`);
         await new Promise((r) => setTimeout(r, wait * 1000));
       } else {
