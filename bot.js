@@ -1150,58 +1150,29 @@ bot.on("text", async (ctx) => {
 console.log("ENV check — BOT_TOKEN set:", !!process.env.BOT_TOKEN, "REDIS_URL set:", !!process.env.REDIS_URL, "ADMIN_USERS:", process.env.ADMIN_USERS || "(none)");
 
 async function startBot() {
-  // Step 1: Wait for old container to fully die during Railway deploys
+  // Wait for old container to die during Railway deploys
   console.log("Waiting 15s for old container to shut down...");
   await new Promise((r) => setTimeout(r, 15000));
 
-  // Step 2: Verify token works
-  try {
-    const me = await bot.telegram.getMe();
-    console.log(`Token OK: @${me.username}`);
-  } catch (err) {
-    console.error("Token verification failed:", err.message);
-    process.exit(1);
-  }
+  // Verify token
+  const me = await bot.telegram.getMe();
+  bot.botInfo = me;
+  bot.options.username = me.username;
+  console.log(`Token OK: @${me.username}`);
 
-  // Step 3: Clear any stale webhook/polling
-  try {
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    console.log("Webhook cleared");
-  } catch (err) {
-    console.error("deleteWebhook failed:", err.message);
-  }
+  // Clear stale state
+  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+  console.log("Webhook cleared, starting polling...");
 
-  // Step 4: Wait a bit more, then start polling
-  await new Promise((r) => setTimeout(r, 2000));
-
-  // Step 5: Launch with polling (with timeout)
-  for (let attempt = 1; attempt <= 6; attempt++) {
-    try {
-      console.log(`Polling attempt ${attempt}/6...`);
-      const launchPromise = bot.launch({ dropPendingUpdates: true });
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Launch timed out after 15s")), 15000)
-      );
-      await Promise.race([launchPromise, timeoutPromise]);
-      console.log("Bot is live and polling!");
-      return;
-    } catch (err) {
-      console.error(`Attempt ${attempt} error:`, err?.message || err);
-      const is409 = err?.response?.error_code === 409;
-      const isTimeout = err?.message?.includes("timed out");
-      if ((is409 || isTimeout) && attempt < 6) {
-        const wait = attempt * 5;
-        console.log(`Retrying in ${wait}s...`);
-        try { bot.stop(); } catch (_) {} // Stop any partial polling
-        await new Promise((r) => setTimeout(r, wait * 1000));
-      } else {
-        console.error("All launch attempts failed");
-        process.exit(1);
-      }
-    }
-  }
+  // Start polling manually (bot.launch() hangs on Railway)
+  bot.startPolling();
+  console.log("Bot is live and polling!");
 }
-startBot();
+
+startBot().catch((err) => {
+  console.error("Fatal:", err);
+  process.exit(1);
+});
 
 process.once("SIGINT", () => { bot.stop("SIGINT"); redis.disconnect(); });
 process.once("SIGTERM", () => { bot.stop("SIGTERM"); redis.disconnect(); });
